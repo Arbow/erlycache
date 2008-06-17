@@ -30,9 +30,6 @@
 %% internal funtions export
 -export([datum_loop/1, datum_init/1]).
 
-%% test functions export
--export([readline/1, split_space/1]).
-
 %% Server listening port
 -define(LISTEN_PORT, 11212).
 
@@ -233,16 +230,17 @@ datum_loop(#datum_state{id=Id, data=Data, ttl=TTL, flags=Flag, bytes=Size} = Sta
     
 
 %%--------------------------------------------------------------------
-%%% Internal functions
+%%% Network functions - Using binary match for greater efficiency
 %%--------------------------------------------------------------------
+
 socket_handler(Socket, Controller) ->
-    socket_handler(Socket,Controller, []).
+    socket_handler(Socket,Controller, <<>>).
 
 socket_handler(Socket, Controller, Buffer) ->
     receive
 	{tcp, Socket, Binary} ->
-	    Request = Buffer ++ binary_to_list(Binary),
-	    socket_handle_request(Socket, Controller, Request);
+	    Request = <<Buffer/binary, Binary/binary>>,
+	    handle_tcp_request(Socket, Controller, Request);
 	{tcp_closed, Socket} ->
 	    ok;
 	Any ->
@@ -250,55 +248,52 @@ socket_handler(Socket, Controller, Buffer) ->
 	    socket_handler(Socket, Controller, Buffer)
     end.
 
-socket_handle_request(Socket, Controller, []) ->
-    socket_handler(Socket, Controller, []);
-socket_handle_request(Socket, Controller, RequestBuffer) ->
-    %io:format("Receive request ~w~n", [RequestBuffer]),
-    case readline(RequestBuffer) of
-        {newline, Request, RequestBufferRemaining} ->
-            case "quit\r\n" == Request of
-                true ->
-                    tcp_server:stop(?LISTEN_PORT);
-                false ->
-                    case handle_request(Socket, list_to_binary(Request), RequestBufferRemaining) of
-                        {ok, RemainingBuffer} ->
-                            socket_handle_request(Socket, Controller, RemainingBuffer);
-                        {not_complete} ->
-                            socket_handler(Socket, Controller, RequestBuffer)
-                    end
-                    
-            end;
-	{noline, Buffer} ->
-	    socket_handler(Socket, Controller, Buffer)
-    end.
-    
-handle_request(Socket, <<"version">>, RequestBufferRemaining) ->
-    gen_tcp:send(Socket, ?VERSION),
-    {ok, RequestBufferRemaining};
-handle_request(Socket, <<"set ", _Bin/binary>>=Request, RequestBufferRemaining) ->
-    handle_request_set(Socket, binary_to_list(Request), RequestBufferRemaining);
-handle_request(Socket, <<"get ", Bin/binary>>, RequestBufferRemaining) ->
-    handle_request_get(Socket, binary_to_list(Bin), RequestBufferRemaining);
-handle_request(Socket, Request, RequestBufferRemaining) ->
-    %io:format("handle request ~w~n", [Request]),
-    gen_tcp:send(Socket, ?NOTSTORE_RESPONSE),
-    {ok, RequestBufferRemaining}. %% TODO
+handle_tcp_request(Socket, Controller, <<>>) ->
+    socket_handler(Socket, Controller, <<>>); % buffer empty, continue receive
 
-handle_request_set(Socket, Request, RequestBufferRemaining) ->
-    ["set", Key, Flags, ExpTime, Bytes] = split_space(Request),
-    case readline(RequestBufferRemaining) of 
-        {newline, Value, Remaining} ->
-            %io:format("Store key ~p~n", [Key]),
-            gen_server:cast(erlycache, {set, Key, Value, ExpTime, Flags, Bytes, self()}),
-            receive
-                _Any ->
-                    ok
-            end,
-            gen_tcp:send(Socket, ?STORED_RESPONSE),
-            {ok, Remaining};
-        {noline, _Buffer} -> {not_complete}
+handle_tcp_request(Socket, Controller, <<"quit\r\n", Rest/binary>>) ->
+    gen_tcp:close(Socket);
+
+handle_tcp_request(Socket, Controller, <<"version\r\n", Rest/binary>>) ->
+    gen_tcp:send(Socket, ?VERSION),
+    socket_handler(Socket, Controller, Rest);
+
+handle_tcp_request(Socket, Controller, <<"set ", _/binary>>=Request) ->
+    handle_set_request(Socket, Controller, Request);
+
+handle_tcp_request(Socket, Controller, <<"get ", _/binary>>=Request) ->
+    handle_get_request(Socket, Controller, Request);
+
+handle_tcp_request(Sockc, Controller, Request) ->
+    %% TODO if \r\n found in request, gen_tcp:send(Socket, ?NOTSTORE_RESPONSE)
+    socket_handler(Sockc, Controller, Request).
+
+
+handle_set_request(Socket, Controller, Request) ->
+    % request at least two lines
+    case lib_text:readline(Request) of
+	{newline, FirstLine, RestStream1} ->
+	    [<<"set">>, Key, Flags, ExpTime, Bytes] = lib_text:split_space(FirstLine),
+	    DataBlockSize = list_to_integer(binary_to_list(Bytes)),
+	    case RestStream1 of
+		<<DataBlock:DataBlockSize/bytes, "\r\n", RestStream2>> ->
+		    gen_server:cast(erlycache, {set, Key, DataBlock, ExpTime, Flags, Bytes, self()}),
+		    receive
+			_Any -> ok %% TODO Should receive more exact message
+		    end,
+		    gen_tcp:send(Socket, ?STORED_RESPONSE),
+		    socket_handler(Socket, Controller, RestStream2)
+		_ ->
+		    socket_handler(Socket, Controller, Request)
+	    end;
+	_ ->
+	    socket_handler(Socket, Controller, Request)
     end.
+
+handle_get_request(Socket, Controller, Request) ->
+    todo.
     
+
 handle_request_get(Socket, Request, RequestBufferRemaining) ->
     RequestKeys = split_space(Request),
     handle_request_get2(Socket, RequestKeys, RequestBufferRemaining, length(RequestKeys)).
@@ -324,37 +319,3 @@ handle_request_get3(Socket, RequestBufferRemaining, Response, KeySize) ->
         _Any ->
             handle_request_get3(Socket, RequestBufferRemaining, Response, KeySize-1)
     end.
-
-    
-%%------------------------------------------------------------------------------
-%% readline/1: read a new line from buffer, each line ends with "\r\n"
-%%------------------------------------------------------------------------------
-readline([]) ->
-    {noline, []};
-readline([$\r, $\n|T]) ->
-    {newline, [], T};
-readline([H|T]) ->
-    case readline(T) of
-	{newline, Line, OtherLine} ->
-	    {newline, [H|Line], OtherLine};
-	{noline, Line} ->
-	    {noline, [H|Line]}
-    end.
-
-%%------------------------------------------------------------------------------
-%% split_space/1: get line content by space spliter " "
-%%------------------------------------------------------------------------------
-split_space(Line) ->
-    split_space(Line, [], []).
-
-split_space([], [], Tokens) ->
-    lists:reverse(Tokens);
-split_space([], Token, Tokens) ->
-    lists:reverse([lists:reverse(Token)|Tokens]);
-split_space([$ |T], [], Tokens) ->
-    split_space(T, [], Tokens);
-split_space([$ |T], Token, Tokens) ->
-    split_space(T, [], [lists:reverse(Token)|Tokens]);
-split_space([H|T], Token, Tokens) ->
-    split_space(T, [H|Token], Tokens).
-
