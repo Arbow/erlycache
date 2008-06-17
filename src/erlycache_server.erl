@@ -282,7 +282,7 @@ handle_set_request(Socket, Controller, Request) ->
 			_Any -> ok %% TODO Should receive more exact message
 		    end,
 		    gen_tcp:send(Socket, ?STORED_RESPONSE),
-		    socket_handler(Socket, Controller, RestStream2)
+		    socket_handler(Socket, Controller, RestStream2);
 		_ ->
 		    socket_handler(Socket, Controller, Request)
 	    end;
@@ -291,31 +291,34 @@ handle_set_request(Socket, Controller, Request) ->
     end.
 
 handle_get_request(Socket, Controller, Request) ->
-    todo.
+    % request at least one line
+    case lib_text:readline(Request) of
+	{newline, Line, RestStream} ->
+	    [<<"get">> | KeyTails] = lib_text:split_space(Line),
+	    Response = handle_get_request2(KeyTails, length(KeyTails)),
+	    gen_tcp:send(Socket, Response),
+	    socket_handler(Socket, Controller, RestStream);
+	_ ->
+	    socket_handler(Socket, Controller, Request)
+    end.
+
+handle_get_request2([], KeySize) ->
+    handle_get_request3(KeySize, <<>>);
+handle_get_request2([Key|KeysTail], KeySize) ->
+    gen_server:cast(erlycache, {get, Key, self()}),
+    handle_get_request2(KeysTail, KeySize).
     
 
-handle_request_get(Socket, Request, RequestBufferRemaining) ->
-    RequestKeys = split_space(Request),
-    handle_request_get2(Socket, RequestKeys, RequestBufferRemaining, length(RequestKeys)).
-    
-handle_request_get2(Socket, [], RequestBufferRemaining, KeySize) ->
-    handle_request_get3(Socket, RequestBufferRemaining, [], KeySize);
-handle_request_get2(Socket, [H|T], RequestBufferRemaining, KeySize) ->
-    %io:format("Async cast request to erlycache genserver~n"),
-    gen_server:cast(erlycache, {get, H, self()}),
-    handle_request_get2(Socket, T, RequestBufferRemaining, KeySize).
-    
-handle_request_get3(Socket, RequestBufferRemaining, Response, 0) ->
-    Response2 = lists:flatten([Response, ?GET_END_RESPONSE]),
-    %io:format("Response get:~w~n", [Response2]),
-    gen_tcp:send(Socket, list_to_binary(Response2)),
-    {ok, RequestBufferRemaining};
-handle_request_get3(Socket, RequestBufferRemaining, Response, KeySize) ->
+handle_get_request3(0, Response) ->
+    FinalResponse = <<Response, ?GET_END_RESPONSE>>,
+    FinalResponse;
+handle_get_request3(KeySizeRemain, Response) ->
     receive
         {get, Key, Value, Flag, Size} ->
             %io:format("Receive key ~p, value ~p~n", [Key, Value]),
-            ResponseLine = ["VALUE ", Key, " ", Flag, " ", Size, "\r\n", Value, "\r\n"],
-            handle_request_get3(Socket, RequestBufferRemaining, [ResponseLine|Response], KeySize-1);
-        _Any ->
-            handle_request_get3(Socket, RequestBufferRemaining, Response, KeySize-1)
+	    NewResponse = <<Response/binary, "VALUE ", Key, " ", Flag, " ", Size, "\r\n", Value, "\r\n">>,
+	    handle_get_request3(KeySizeRemain-1, NewResponse);
+	_ ->
+	    handle_get_request3(KeySizeRemain-1, Response)
     end.
+    
