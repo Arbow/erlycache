@@ -82,7 +82,7 @@ extract_str_end_with_tag2(Tag, TagSize, Offset, BeginOffset, Data) ->
 	<<_:Offset/bytes, _:5/bytes, Tag:TagSize/bytes, _/binary>> -> 
 	    extract_str_end_with_tag3(BeginOffset, Offset+5, Offset+5+TagSize, Data);
 	<<_:Offset/bytes, _:6/bytes, Tag:TagSize/bytes, _/binary>> -> 
-	    extract_str_end_with_tag3(BeginOffset, Offset+6, Offset+61+TagSize, Data);
+	    extract_str_end_with_tag3(BeginOffset, Offset+6, Offset+6+TagSize, Data);
 	<<_:Offset/bytes, _:7/bytes, Tag:TagSize/bytes, _/binary>> -> 
 	    extract_str_end_with_tag3(BeginOffset, Offset+7, Offset+7+TagSize, Data);
 	<<_:Offset/bytes, _:8/bytes, Tag:TagSize/bytes, _/binary>> -> 
