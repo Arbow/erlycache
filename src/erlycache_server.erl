@@ -41,7 +41,7 @@
 -define(ERROR_RESPONSE, <<"ERROR\r\n">>).
 -define(STORED_RESPONSE, <<"STORED\r\n">>).
 -define(NOTSTORE_RESPONSE, <<"NOT_STORED\r\n">>).
--define(GET_END_RESPONSE, "END\r\n").
+-define(GET_END_RESPONSE, <<"END\r\n">>).
 
 %%====================================================================
 %% API
@@ -202,7 +202,7 @@ datum_start(DataTuple) ->
 
 datum_init({From, Key, Value, ExpTime, Flag, Size}) ->
     From ! {ok, stored},
-    datum_loop(#datum_state{id=Key, data=Value, ttl=list_to_integer(ExpTime)*1000, flags=Flag, bytes=Size}).
+    datum_loop(#datum_state{id=Key, data=Value, ttl=list_to_integer(binary_to_list(ExpTime))*1000, flags=Flag, bytes=Size}).
 
 datum_loop(#datum_state{id=Id, data=Data, ttl=TTL, flags=Flag, bytes=Size} = State) ->
     receive
@@ -210,7 +210,7 @@ datum_loop(#datum_state{id=Id, data=Data, ttl=TTL, flags=Flag, bytes=Size} = Sta
 	%% Cache manager requests data to be replaced...
 	{new_data, {From, Key, NewValue, NewExpTime, NewFlag, NewSize}} ->
 	    From ! {ok, updated},
-	    datum_loop(State#datum_state{data=NewValue, ttl=list_to_integer(NewExpTime)*1000, flags=NewFlag, bytes=NewSize});
+	    datum_loop(State#datum_state{data=NewValue, ttl=list_to_integer(binary_to_list(NewExpTime))*1000, flags=NewFlag, bytes=NewSize});
             
 	%% Request for cached data...
 	{get, From} when is_pid(From) ->
@@ -276,7 +276,7 @@ handle_set_request(Socket, Controller, Request) ->
 	    [<<"set">>, Key, Flags, ExpTime, Bytes] = lib_text:split_space(FirstLine),
 	    DataBlockSize = list_to_integer(binary_to_list(Bytes)),
 	    case RestStream1 of
-		<<DataBlock:DataBlockSize/bytes, "\r\n", RestStream2>> ->
+		<<DataBlock:DataBlockSize/bytes, "\r\n", RestStream2/binary>> ->
 		    gen_server:cast(erlycache, {set, Key, DataBlock, ExpTime, Flags, Bytes, self()}),
 		    receive
 			_Any -> ok %% TODO Should receive more exact message
@@ -310,13 +310,13 @@ handle_get_request2([Key|KeysTail], KeySize) ->
     
 
 handle_get_request3(0, Response) ->
-    FinalResponse = <<Response, ?GET_END_RESPONSE>>,
+    FinalResponse = <<Response/binary, ?GET_END_RESPONSE/binary>>,
     FinalResponse;
 handle_get_request3(KeySizeRemain, Response) ->
     receive
         {get, Key, Value, Flag, Size} ->
             %io:format("Receive key ~p, value ~p~n", [Key, Value]),
-	    NewResponse = <<Response/binary, "VALUE ", Key, " ", Flag, " ", Size, "\r\n", Value, "\r\n">>,
+	    NewResponse = <<Response/binary, "VALUE ", Key/binary, " ", Flag/binary, " ", Size/binary, "\r\n", Value/binary, "\r\n">>,
 	    handle_get_request3(KeySizeRemain-1, NewResponse);
 	_ ->
 	    handle_get_request3(KeySizeRemain-1, Response)
